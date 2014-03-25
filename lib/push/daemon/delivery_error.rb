@@ -12,7 +12,7 @@ module Push
     end
 
     def message
-      ext_id_msg = @ext_id ? "ext_id #{@ext_id }" : nil
+      ext_id_msg = @ext_id ? "#{Push.ext_id_tag} #{@ext_id}" : nil
       [ "Unable to deliver message #{@message_id}"
         ext_id_msg,
         "received #{@source} error #{@code} (#{@description})",

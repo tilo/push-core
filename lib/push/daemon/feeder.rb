@@ -6,8 +6,8 @@ module Push
       extend DatabaseReconnectable
       extend InterruptibleSleep
 
-      RESERVATION_TIME = 2.minutes
-      MAX_TASKS   = 100
+      RESERVATION_TIME = 5.minutes # this can add latency for delivery if a daemon dies
+      BATCH_SIZE = 300
 
       def self.name
         "Feeder"
@@ -22,8 +22,14 @@ module Push
 
         loop do
           break if @stop
-          sweep
-          enqueue_notifications
+          sweep  # re-queue expired jobs
+
+          with_database_reconnect_and_retry(name) do
+            Push::Message.where(:reserved_by => nil).ready_for_delivery.find_in_batches(:batch_size => BATCH_SIZE) do |batch|
+              enqueue_notifications(batch)
+            end
+          end
+
           interruptible_sleep config.push_poll
         end
       end
@@ -48,25 +54,25 @@ module Push
         end
       end
 
-      def self.enqueue_notifications
+      def self.enqueue_notifications(batch)
         begin
-          with_database_reconnect_and_retry(name) do
-            Push::Daemon::App.ready.each do |app|
-              reserved_until = Time.now + RESERVATION_TIME
+          ready_apps = Push::Daemon::App.ready
+          reserved_until = Time.now + RESERVATION_TIME
 
-              # First reserve the notifications for delivery by this instance of the daemon
-              num_reserved = Push::Message.ready_for_delivery.where(:app => app).update_all(
-                {:reserved_by => us, :reserved_until => reserved_until}, :limit => MAX_TASKS
-              )
-              # if we succeeded with the reservation, then process the notifications
-              if num_reserved > 0
-                Push::Messages.where(:reserved_by => us).find_each do |notification|
-                  Push::Daemon::App.deliver(notification)
-                end
-              else
-                # someone else beat us to it
+          # First reserve the notifications for delivery by this instance of the daemon
+          num_reserved = batch.update_all(
+            {:reserved_by => us, :reserved_until => reserved_until},
+            :conditions => {:reserved_by => nil} # make sure noone else beat us to it
+          )
+          # if we succeeded with the reservation, then process the notifications
+          if num_reserved > 0
+            Push::Message.where(:reserved_by => us).find_each do |notification|
+              if ready_apps.include?(notification.app) && (notification.reserved_until >= Time.now)
+                Push::Daemon::App.deliver(notification)
               end
             end
+          else
+            # someone else beat us to it, or there are no notifications to be processed
           end
         rescue StandardError => e
           Push::Daemon.logger.error(e)

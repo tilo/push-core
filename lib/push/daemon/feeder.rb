@@ -26,7 +26,7 @@ module Push
 
           with_database_reconnect_and_retry(name) do
             begin
-              num_reserved = Push::Message.where(:reserved_by => nil).ready_for_delivery.limit(BATCH_SIZE).update_all(
+              num_reserved = Push::Message.ready_for_delivery.where(:reserved_by => nil).limit(BATCH_SIZE).update_all(
                 {:reserved_by => us, :reserved_until => Time.now + RESERVATION_TIME }
               )
               enqueue_notifications if num_reserved > 0
@@ -49,7 +49,7 @@ module Push
         begin
           with_database_reconnect_and_retry(name) do
             # re-queue notifications with stale reservations (in case other daemon died)
-            Push::Message.where("reserved_until < ?", Time.now).update_all(
+            Push::Message.ready_for_delivery.where("reserved_until < ?", Time.now).update_all(
               {:reserved_by => nil, :reserved_until => nil}
             )
           end
@@ -62,9 +62,9 @@ module Push
         begin
           ready_apps = Push::Daemon::App.ready
 
-          Push::Message.where(:reserved_by => us).find_each do |notification|
+          Push::Message.ready_for_delivery.where(:reserved_by => us).find_each do |notification|
             if ready_apps.include?(notification.app) && (notification.reserved_until >= Time.now)
-              Push::Daemon::App.deliver(notification)
+              Push::Daemon::App.deliver(notification) unless notification.delivered
             end
           end
         rescue StandardError => e
